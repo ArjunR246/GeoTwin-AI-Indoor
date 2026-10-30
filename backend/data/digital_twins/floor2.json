@@ -1,0 +1,37 @@
+{
+  "id": "floor2_l_shaped_residential",
+  "description": "L-shaped residential/lab floor with a corridor, interior rooms, and varied partitions.",
+  "walls": [
+    { "id": "lower-bedroom-divider", "start": { "x": 6, "y": 0 }, "end": { "x": 6, "y": 7 }, "material": "drywall" },
+    { "id": "lower-kitchen-divider", "start": { "x": 13, "y": 0 }, "end": { "x": 13, "y": 7 }, "material": "brick" },
+    { "id": "lower-utility-divider", "start": { "x": 20, "y": 0 }, "end": { "x": 20, "y": 7 }, "material": "concrete" },
+    { "id": "upper-bedroom-divider", "start": { "x": 8, "y": 11 }, "end": { "x": 8, "y": 15 }, "material": "wood" },
+    { "id": "upper-study-divider", "start": { "x": 15, "y": 11 }, "end": { "x": 15, "y": 18 }, "material": "glass" },
+    { "id": "south-corridor-west", "start": { "x": 0, "y": 7 }, "end": { "x": 4.5, "y": 7 }, "material": "wood" },
+    { "id": "south-corridor-centre", "start": { "x": 5.5, "y": 7 }, "end": { "x": 11.5, "y": 7 }, "material": "drywall" },
+    { "id": "south-corridor-east", "start": { "x": 12.5, "y": 7 }, "end": { "x": 18.5, "y": 7 }, "material": "glass" },
+    { "id": "south-corridor-east-end", "start": { "x": 19.5, "y": 7 }, "end": { "x": 26, "y": 7 }, "material": "drywall" },
+    { "id": "north-corridor-west", "start": { "x": 0, "y": 11 }, "end": { "x": 6.5, "y": 11 }, "material": "wood" },
+    { "id": "north-corridor-centre", "start": { "x": 7.5, "y": 11 }, "end": { "x": 14, "y": 11 }, "material": "brick" }
+  ],
+  "valid_ap_zones": [
+    [
+      { "x": 0, "y": 0 },
+      { "x": 26, "y": 0 },
+      { "x": 26, "y": 11 },
+      { "x": 15, "y": 11 },
+      { "x": 15, "y": 18 },
+      { "x": 0, "y": 18 }
+    ]
+  ],
+  "valid_receiver_zones": [
+    [
+      { "x": 0, "y": 0 },
+      { "x": 26, "y": 0 },
+      { "x": 26, "y": 11 },
+      { "x": 15, "y": 11 },
+      { "x": 15, "y": 18 },
+      { "x": 0, "y": 18 }
+    ]
+  ]
+}

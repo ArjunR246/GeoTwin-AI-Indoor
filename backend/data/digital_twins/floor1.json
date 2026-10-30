@@ -1,0 +1,36 @@
+{
+  "id": "floor1_office",
+  "description": "30 m by 20 m multi-room office with a central corridor and mixed wall materials.",
+  "walls": [
+    { "id": "south-west-office", "start": { "x": 7, "y": 0 }, "end": { "x": 7, "y": 8 }, "material": "drywall" },
+    { "id": "south-meeting-room", "start": { "x": 15, "y": 0 }, "end": { "x": 15, "y": 8 }, "material": "glass" },
+    { "id": "south-server-room", "start": { "x": 23, "y": 0 }, "end": { "x": 23, "y": 8 }, "material": "brick" },
+    { "id": "north-west-office", "start": { "x": 8, "y": 12 }, "end": { "x": 8, "y": 20 }, "material": "drywall" },
+    { "id": "north-conference-room", "start": { "x": 17, "y": 12 }, "end": { "x": 17, "y": 20 }, "material": "concrete" },
+    { "id": "north-east-office", "start": { "x": 25, "y": 12 }, "end": { "x": 25, "y": 20 }, "material": "glass" },
+    { "id": "south-corridor-west", "start": { "x": 0, "y": 8 }, "end": { "x": 4.5, "y": 8 }, "material": "wood" },
+    { "id": "south-corridor-centre", "start": { "x": 6, "y": 8 }, "end": { "x": 13.5, "y": 8 }, "material": "drywall" },
+    { "id": "south-corridor-east", "start": { "x": 15, "y": 8 }, "end": { "x": 21.5, "y": 8 }, "material": "brick" },
+    { "id": "south-corridor-east-end", "start": { "x": 23, "y": 8 }, "end": { "x": 30, "y": 8 }, "material": "drywall" },
+    { "id": "north-corridor-west", "start": { "x": 0, "y": 12 }, "end": { "x": 5, "y": 12 }, "material": "drywall" },
+    { "id": "north-corridor-centre", "start": { "x": 6.5, "y": 12 }, "end": { "x": 15, "y": 12 }, "material": "brick" },
+    { "id": "north-corridor-east", "start": { "x": 16.5, "y": 12 }, "end": { "x": 23, "y": 12 }, "material": "drywall" },
+    { "id": "north-corridor-east-end", "start": { "x": 24.5, "y": 12 }, "end": { "x": 30, "y": 12 }, "material": "concrete" }
+  ],
+  "valid_ap_zones": [
+    [
+      { "x": 0, "y": 0 },
+      { "x": 30, "y": 0 },
+      { "x": 30, "y": 20 },
+      { "x": 0, "y": 20 }
+    ]
+  ],
+  "valid_receiver_zones": [
+    [
+      { "x": 0, "y": 0 },
+      { "x": 30, "y": 0 },
+      { "x": 30, "y": 20 },
+      { "x": 0, "y": 20 }
+    ]
+  ]
+}

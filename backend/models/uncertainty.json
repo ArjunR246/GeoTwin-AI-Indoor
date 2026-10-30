@@ -1,0 +1,28 @@
+{
+  "method": "held_out_absolute_residual_quantile",
+  "confidence_level": 0.9,
+  "validation_samples": 1800,
+  "global_half_width_db": 6.6282302687124695,
+  "by_wall_count": {
+    "0": {
+      "sample_count": 315,
+      "half_width_db": 6.475334559001046
+    },
+    "1": {
+      "sample_count": 573,
+      "half_width_db": 6.714571432607502
+    },
+    "2": {
+      "sample_count": 602,
+      "half_width_db": 6.6954258340824255
+    },
+    "3": {
+      "sample_count": 253,
+      "half_width_db": 6.342246118813973
+    },
+    "4": {
+      "sample_count": 56,
+      "half_width_db": 7.331330139230488
+    }
+  }
+}

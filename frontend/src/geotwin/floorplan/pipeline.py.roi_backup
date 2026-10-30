@@ -1,0 +1,433 @@
+"""
+GeoTwin AI Indoor - Floor-plan processing pipeline.
+
+Converts an arbitrary floor-plan image into a unified BuildingModel
+and, when physical dimensions are available, a CoordinateTransform.
+
+Pipeline:
+
+    Floor-plan image
+          |
+          v
+    Preprocessing
+          |
+          +----> Wall detection
+          |
+          +----> Room detection
+          |
+          +----> Corridor detection
+          |
+          +----> Remove corridor candidates from room set
+          |
+          v
+    BuildingModel
+          |
+          v
+    CoordinateTransform (optional)
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from .building_model import (
+    BuildingModel,
+    build_building_model,
+)
+from .coordinates import CoordinateTransform
+from .corridors import detect_corridors
+from .loader import load_floor_plan
+from .preprocessing import preprocess_floor_plan
+from .rooms import detect_rooms
+from .walls import detect_walls
+
+
+@dataclass(frozen=True)
+class FloorPlanPipelineResult:
+    """
+    Complete result of floor-plan processing.
+
+    Geometry remains in pixel coordinates inside BuildingModel.
+    CoordinateTransform provides optional physical-world scaling.
+    """
+
+    image_width: int
+    image_height: int
+
+    building: BuildingModel
+
+    coordinates: CoordinateTransform | None
+
+    preprocessing: dict[str, np.ndarray]
+
+    @property
+    def has_physical_scale(self) -> bool:
+        """Return True when physical dimensions were supplied."""
+        return self.coordinates is not None
+
+    @property
+    def wall_count(self) -> int:
+        """Return detected wall count."""
+        return self.building.wall_count
+
+    @property
+    def room_count(self) -> int:
+        """Return detected semantic room count."""
+        return self.building.room_count
+
+    @property
+    def corridor_count(self) -> int:
+        """Return detected corridor count."""
+        return self.building.corridor_count
+
+
+def process_floor_plan(
+    image: np.ndarray,
+    *,
+    physical_width_m: float | None = None,
+    physical_height_m: float | None = None,
+    origin_x_m: float = 0.0,
+    origin_y_m: float = 0.0,
+    room_min_area: float = 1000.0,
+    room_max_area_ratio: float = 0.95,
+    corridor_min_aspect_ratio: float = 3.0,
+    corridor_max_width: float | None = None,
+    corridor_min_area: float = 1000.0,
+) -> FloorPlanPipelineResult:
+    """
+    Process an arbitrary floor-plan image.
+
+    Args:
+        image:
+            2D grayscale or 3D color floor-plan image.
+
+        physical_width_m:
+            Real-world floor-plan width in metres.
+
+        physical_height_m:
+            Real-world floor-plan height in metres.
+
+        origin_x_m:
+            Physical X-coordinate of image origin.
+
+        origin_y_m:
+            Physical Y-coordinate of image origin.
+
+        room_min_area:
+            Minimum room area in pixels.
+
+        room_max_area_ratio:
+            Maximum room area relative to image area.
+
+        corridor_min_aspect_ratio:
+            Minimum corridor aspect ratio.
+
+        corridor_max_width:
+            Optional maximum corridor width in pixels.
+
+        corridor_min_area:
+            Minimum corridor area in pixels.
+
+    Returns:
+        FloorPlanPipelineResult.
+
+    Raises:
+        TypeError:
+            If image is not a NumPy array.
+
+        ValueError:
+            If image or physical dimensions are invalid.
+    """
+
+    # =========================================================
+    # VALIDATION
+    # =========================================================
+
+    _validate_image(image)
+
+    # Physical dimensions must be supplied together.
+    if (
+        physical_width_m is None
+        and physical_height_m is not None
+    ):
+        raise ValueError(
+            "physical_width_m must be provided when "
+            "physical_height_m is provided."
+        )
+
+    if (
+        physical_width_m is not None
+        and physical_height_m is None
+    ):
+        raise ValueError(
+            "physical_height_m must be provided when "
+            "physical_width_m is provided."
+        )
+
+    if (
+        physical_width_m is not None
+        and physical_width_m <= 0
+    ):
+        raise ValueError(
+            "physical_width_m must be positive."
+        )
+
+    if (
+        physical_height_m is not None
+        and physical_height_m <= 0
+    ):
+        raise ValueError(
+            "physical_height_m must be positive."
+        )
+
+    image_height, image_width = image.shape[:2]
+
+    # =========================================================
+    # 1. PREPROCESSING
+    # =========================================================
+
+    preprocessing = preprocess_floor_plan(image)
+
+    cleaned = preprocessing["cleaned"]
+    edges = preprocessing["edges"]
+
+    # =========================================================
+    # 2. WALL DETECTION
+    # =========================================================
+
+    walls = detect_walls(
+        binary=cleaned,
+        edges=edges,
+    )
+
+    # =========================================================
+    # 3. ROOM / ENCLOSED-REGION DETECTION
+    # =========================================================
+    #
+    # At this stage detect_rooms() returns all sufficiently large
+    # enclosed regions. Some of these regions may actually be
+    # corridors.
+    #
+    # Therefore, this is initially a candidate-room collection,
+    # not yet the final semantic room collection.
+
+    room_detection_image = preprocessing["binary"]
+
+    detected_regions = detect_rooms(
+    room_detection_image,
+    min_area=room_min_area,
+    max_area_ratio=room_max_area_ratio,
+)
+
+    # =========================================================
+    # 4. CORRIDOR DETECTION
+    # =========================================================
+
+    corridors = detect_corridors(
+        detected_regions,
+        min_aspect_ratio=corridor_min_aspect_ratio,
+        max_width=corridor_max_width,
+        min_area=corridor_min_area,
+    )
+
+    # =========================================================
+    # 4B. REMOVE CORRIDOR REGIONS FROM ROOM SET
+    # =========================================================
+    #
+    # A corridor is originally detected from the same enclosed
+    # regions returned by detect_rooms().
+    #
+    # Without this filtering, a corridor is counted twice:
+    #
+    #     room_count    = actual rooms + corridors
+    #     corridor_count = corridors
+    #
+    # For example:
+    #
+    #     4 rooms + 1 corridor
+    #
+    # would incorrectly become:
+    #
+    #     5 rooms + 1 corridor
+    #
+    # We therefore remove corridor candidates from the final
+    # semantic room collection.
+    #
+    # Corridor IDs are derived from the original Room IDs:
+    #
+    #     room_1 -> corridor_1
+    #
+    # so we can map them back deterministically.
+
+    corridor_room_ids = {
+        corridor.id.replace(
+            "corridor_",
+            "room_",
+        )
+        for corridor in corridors
+    }
+
+    rooms = [
+        room
+        for room in detected_regions
+        if room.id not in corridor_room_ids
+    ]
+
+    # =========================================================
+    # 5. BUILD UNIFIED BUILDING MODEL
+    # =========================================================
+
+    building = build_building_model(
+        image_width=image_width,
+        image_height=image_height,
+        walls=walls,
+        rooms=rooms,
+        corridors=corridors,
+    )
+
+    # =========================================================
+    # 6. OPTIONAL PHYSICAL COORDINATE TRANSFORMATION
+    # =========================================================
+
+    coordinates = None
+
+    if (
+        physical_width_m is not None
+        and physical_height_m is not None
+    ):
+        coordinates = CoordinateTransform(
+            image_width_px=image_width,
+            image_height_px=image_height,
+            physical_width_m=physical_width_m,
+            physical_height_m=physical_height_m,
+            origin_x_m=origin_x_m,
+            origin_y_m=origin_y_m,
+        )
+
+    # =========================================================
+    # 7. RETURN COMPLETE PIPELINE RESULT
+    # =========================================================
+
+    return FloorPlanPipelineResult(
+        image_width=image_width,
+        image_height=image_height,
+        building=building,
+        coordinates=coordinates,
+        preprocessing=preprocessing,
+    )
+
+
+def process_floor_plan_file(
+    path: str | Path,
+    *,
+    physical_width_m: float | None = None,
+    physical_height_m: float | None = None,
+    origin_x_m: float = 0.0,
+    origin_y_m: float = 0.0,
+    room_min_area: float = 1000.0,
+    room_max_area_ratio: float = 0.95,
+    corridor_min_aspect_ratio: float = 3.0,
+    corridor_max_width: float | None = None,
+    corridor_min_area: float = 1000.0,
+) -> FloorPlanPipelineResult:
+    """
+    Load and process a floor-plan image from disk.
+
+    Args:
+        path:
+            Path to the floor-plan image.
+
+        physical_width_m:
+            Real-world floor-plan width in metres.
+
+        physical_height_m:
+            Real-world floor-plan height in metres.
+
+        origin_x_m:
+            Physical X-coordinate of image origin.
+
+        origin_y_m:
+            Physical Y-coordinate of image origin.
+
+        room_min_area:
+            Minimum enclosed room area in pixels.
+
+        room_max_area_ratio:
+            Maximum allowed enclosed-region area as a fraction
+            of the complete image.
+
+        corridor_min_aspect_ratio:
+            Minimum aspect ratio required for corridor detection.
+
+        corridor_max_width:
+            Optional maximum corridor width in pixels.
+
+        corridor_min_area:
+            Minimum corridor area in pixels.
+
+    Returns:
+        FloorPlanPipelineResult.
+    """
+
+    image = load_floor_plan(path)
+
+    return process_floor_plan(
+        image,
+        physical_width_m=physical_width_m,
+        physical_height_m=physical_height_m,
+        origin_x_m=origin_x_m,
+        origin_y_m=origin_y_m,
+        room_min_area=room_min_area,
+        room_max_area_ratio=room_max_area_ratio,
+        corridor_min_aspect_ratio=corridor_min_aspect_ratio,
+        corridor_max_width=corridor_max_width,
+        corridor_min_area=corridor_min_area,
+    )
+
+
+def _validate_image(
+    image: np.ndarray,
+) -> None:
+    """
+    Validate an input floor-plan image.
+
+    Supported formats:
+
+        2D grayscale
+        3D single-channel
+        3D RGB
+        3D RGBA
+    """
+
+    if not isinstance(image, np.ndarray):
+        raise TypeError(
+            "image must be a NumPy array."
+        )
+
+    if image.size == 0:
+        raise ValueError(
+            "image cannot be empty."
+        )
+
+    if image.ndim not in (2, 3):
+        raise ValueError(
+            "image must be a 2D grayscale or 3D color image."
+        )
+
+    if (
+        image.ndim == 3
+        and image.shape[2] not in (1, 3, 4)
+    ):
+        raise ValueError(
+            "image must have 1, 3, or 4 channels."
+        )
+
+
+__all__ = [
+    "FloorPlanPipelineResult",
+    "process_floor_plan",
+    "process_floor_plan_file",
+]

@@ -1,0 +1,12 @@
+fastapi
+joblib
+matplotlib
+numpy
+opencv-python
+pandas
+pymoo
+scikit-learn
+shapely
+streamlit
+uvicorn
+xgboost

@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: geotwin-ai-indoor
+Version: 0.1.0
+Summary: GeoTwin AI Indoor RF and optimization system
+Requires-Python: <3.12,>=3.11
