@@ -38,6 +38,7 @@ from .building_model import (
 )
 from .coordinates import CoordinateTransform
 from .corridors import Corridor, detect_corridors
+from .indoor import detect_indoor_space
 from .loader import load_floor_plan
 from .preprocessing import preprocess_floor_plan
 from .rooms import Room, detect_rooms
@@ -91,6 +92,10 @@ class FloorPlanPipelineResult:
     roi: ROI | None = None
 
     coordinate_offset: tuple[int, int] = (0, 0)
+
+    # Usable indoor space (rooms, corridors, halls) in original-image
+    # pixels: 255 = usable, 0 = wall or outside. See indoor.py.
+    indoor_mask: np.ndarray | None = None
 
     @property
     def has_physical_scale(self) -> bool:
@@ -512,6 +517,22 @@ def process_floor_plan(
         ]
 
     # ---------------------------------------------------------
+    # 8b. USABLE INDOOR SPACE (rooms + corridors + halls)
+    # ---------------------------------------------------------
+
+    processed_mask = detect_indoor_space(
+        preprocessing["binary"],
+        room_polygons=[
+            region.polygon for region in detected_regions
+        ],
+    )
+    indoor_mask = np.zeros((image_height, image_width), dtype=np.uint8)
+    indoor_mask[
+        offset_y:offset_y + processed_mask.shape[0],
+        offset_x:offset_x + processed_mask.shape[1],
+    ] = processed_mask
+
+    # ---------------------------------------------------------
     # 9. BUILD UNIFIED BUILDING MODEL
     # ---------------------------------------------------------
 
@@ -554,6 +575,7 @@ def process_floor_plan(
         preprocessing=preprocessing,
         roi=validated_roi,
         coordinate_offset=(offset_x, offset_y),
+        indoor_mask=indoor_mask,
     )
 
 

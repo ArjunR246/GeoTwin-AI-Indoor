@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
+import numpy as np
+
 from .building_model import BuildingModel
 from .coordinates import CoordinateTransform
 from .walls import WallSegment
@@ -73,6 +75,7 @@ def floor_plan_to_rf_geometry(
     building: BuildingModel,
     coordinates: CoordinateTransform,
     cell_size_m: float,
+    indoor_mask: np.ndarray | None = None,
 ) -> tuple[
     list[Point],
     list[Point],
@@ -146,7 +149,17 @@ def floor_plan_to_rf_geometry(
             cell.center
         )
 
-        if cell.occupied:
+        if indoor_mask is not None:
+            # Usable if the cell centre lies in detected indoor space
+            # (rooms, corridors and halls), see indoor.py.
+            column = min(int(cell.center[0]), indoor_mask.shape[1] - 1)
+            row = min(int(cell.center[1]), indoor_mask.shape[0] - 1)
+            usable = bool(indoor_mask[row, column])
+        else:
+            # Original behaviour: only enclosed rooms and corridors.
+            usable = cell.occupied
+
+        if usable:
             receiver_positions.append(
                 physical_position
             )
@@ -185,4 +198,4 @@ __all__ = [
     "transform_wall",
     "transform_walls",
     "floor_plan_to_rf_geometry",
-]
+]

@@ -92,6 +92,7 @@ def generate_plan(
             building=pipeline_result.building,
             coordinates=pipeline_result.coordinates,
             cell_size_m=grid_resolution_m,
+            indoor_mask=pipeline_result.indoor_mask,
         )
         best_solution, access_points = optimize_access_points(
             receiver_positions=receiver_positions,
