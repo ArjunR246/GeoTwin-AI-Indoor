@@ -31,6 +31,7 @@ from services.floorplan_coverage import (
     load_prediction_artifacts,
     optimize_access_points,
     predict_heatmap,
+    smooth_heatmap_grid,
 )
 
 
@@ -112,8 +113,20 @@ def generate_plan(
             tx_power_dbm=tx_power_dbm,
             frequency_ghz=frequency_ghz,
         )
+        smooth_x, smooth_y, smooth_rssi = smooth_heatmap_grid(
+            access_points=access_points,
+            receiver_positions=receiver_positions,
+            walls=walls,
+            artifacts=get_prediction_artifacts(),
+            tx_power_dbm=tx_power_dbm,
+            frequency_ghz=frequency_ghz,
+            width_m=building_width_m,
+            height_m=building_height_m,
+            cell_size_m=grid_resolution_m,
+        )
         return {
             "image_rgb": decode_image(uploaded_file),
+            "smooth_heatmap": (smooth_x, smooth_y, smooth_rssi),
             "pipeline_result": pipeline_result,
             "receiver_positions": receiver_positions,
             "physical_walls": physical_walls,
@@ -128,35 +141,43 @@ def generate_plan(
             temporary_path.unlink(missing_ok=True)
 
 
-def render_heatmap(result: dict[str, object], width_m: float, height_m: float):
+def render_heatmap(
+    result: dict[str, object], width_m: float, height_m: float, show_walls: bool = False
+):
     """Render the final AI heatmap directly over the uploaded floorplan."""
-    x_values, y_values, rssi_grid = heatmap_grid(
-        result["receiver_positions"], result["prediction"].rssi_dbm
-    )
+    x_values, y_values, rssi_grid = result["smooth_heatmap"]
     fig, axis = plt.subplots(figsize=(13, 8), dpi=150)
     axis.imshow(
         result["image_rgb"],
-        extent=[0, width_m,height_m,0],
+        extent=[0, width_m, height_m, 0],
         origin="upper",
         aspect="auto",
         zorder=0,
     )
-    heatmap = axis.pcolormesh(
-        grid_edges(x_values),
-        grid_edges(y_values),
+    step = float(x_values[1] - x_values[0]) if len(x_values) > 1 else 1.0
+    heatmap = axis.imshow(
         np.ma.masked_invalid(rssi_grid),
+        extent=[0, len(x_values) * step, len(y_values) * step, 0],
+        origin="upper",
         cmap="turbo",
         vmin=-90,
         vmax=-25,
-        alpha=0.68,
-        shading="auto",
+        alpha=0.6,
+        interpolation="bilinear",
         zorder=2,
     )
-    for wall in result["physical_walls"]:
-        axis.plot(
-            [wall.x1, wall.x2], [wall.y1, wall.y2],
-            color="#172033", linewidth=1.8, alpha=0.85, zorder=4,
-        )
+    contours = axis.contour(
+        x_values, y_values, np.ma.masked_invalid(rssi_grid),
+        levels=sorted({-75, result["coverage_threshold_dbm"], -60, -50, -40}),
+        colors="white", linewidths=1.0, linestyles="solid", zorder=3,
+    )
+    axis.clabel(contours, fmt="%d dBm", fontsize=7)
+    if show_walls:
+        for wall in result["physical_walls"]:
+            axis.plot(
+                [wall.x1, wall.x2], [wall.y1, wall.y2],
+                color="#172033", linewidth=1.0, alpha=0.7, zorder=4,
+            )
     for index, access_point in enumerate(result["access_points"], start=1):
         axis.scatter(
             access_point.x, access_point.y, marker="*", s=300,
@@ -175,7 +196,7 @@ def render_heatmap(result: dict[str, object], width_m: float, height_m: float):
     axis.set(
         title="Optimized AP Placement and AI-Predicted RSSI",
         xlabel="X position (m)", ylabel="Y position (m, from top edge)",
-        xlim=(0, width_m), ylim=(height_m,0),
+        xlim=(0, width_m), ylim=(height_m, 0),
     )
     axis.set_aspect("equal", adjustable="box")
     fig.tight_layout()
@@ -262,7 +283,8 @@ if result is not None:
     metric_columns[2].metric("Dead zones", f"{metrics['dead_zone_percent']:.1f}%")
     metric_columns[3].metric("Typical uncertainty", f"±{mean_uncertainty:.1f} dB")
 
-    figure = render_heatmap(result, building_width_m, building_height_m)
+    show_walls = st.checkbox("Show detected walls", value=False)
+    figure = render_heatmap(result, building_width_m, building_height_m, show_walls)
     st.pyplot(figure, width="stretch")
     st.download_button(
         "Download heatmap PNG", data=figure_bytes(figure),

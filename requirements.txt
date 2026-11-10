@@ -6,6 +6,7 @@ Opencv-python-headless
 pandas
 pymoo
 scikit-learn
+scipy
 shapely
 streamlit
 uvicorn

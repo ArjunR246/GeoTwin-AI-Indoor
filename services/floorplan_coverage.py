@@ -26,6 +26,8 @@ from utils.calibration import apply_residual_calibration, uncertainty_half_width
 from utils.rssi_features import MODEL_FEATURES, build_rssi_features, feature_frame
 from utils.wall_intersections import wall_attenuation_db
 import pandas as pd
+from scipy import ndimage
+from scipy.spatial import cKDTree
 
 
 @dataclass(frozen=True)
@@ -174,6 +176,68 @@ def predict_heatmap(
         uncertainty_db=uncertainty_matrix[serving_ap_indexes, receiver_indexes],
         serving_ap_indexes=serving_ap_indexes,
     )
+
+
+def smooth_heatmap_grid(
+    access_points: Sequence[object],
+    receiver_positions: Sequence[tuple[float, float]],
+    walls: Sequence[Mapping[str, object]],
+    artifacts: PredictionArtifacts,
+    tx_power_dbm: float,
+    frequency_ghz: float,
+    width_m: float,
+    height_m: float,
+    cell_size_m: float,
+    display_step_m: float = 0.25,
+    smoothing_m: float = 1.0,
+    max_points: int = 60_000,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Predict RSSI on a fine display grid and soften it for a smooth heatmap.
+
+    The coarse receiver grid is still used for coverage numbers. This finer
+    grid is only for drawing, so the picture looks continuous instead of blocky.
+
+    Returns:
+        (x_values, y_values, rssi_grid). rssi_grid is NaN outside the building.
+    """
+    # 1. Choose the display step. Keep the number of points bounded so very
+    #    large floors do not become slow.
+    step = max(display_step_m, float(np.sqrt(width_m * height_m / max_points)))
+    x_values = np.arange(step / 2, width_m, step)
+    y_values = np.arange(step / 2, height_m, step)
+    grid_x, grid_y = np.meshgrid(x_values, y_values)
+
+    # 2. Only draw where the floorplan has usable space: a fine point is
+    #    "inside" if it falls in the square cell of a coarse receiver point.
+    #    p=np.inf measures distance as max(|dx|, |dy|), i.e. a square.
+    tree = cKDTree(np.asarray(receiver_positions, dtype=float))
+    distances, _ = tree.query(
+        np.column_stack((grid_x.ravel(), grid_y.ravel())), p=np.inf
+    )
+    inside = (distances <= cell_size_m / 2).reshape(grid_x.shape)
+
+    # 3. Predict RSSI for every inside point, in chunks to limit memory use.
+    points = list(zip(grid_x[inside], grid_y[inside]))
+    values = np.empty(len(points))
+    chunk = 3000
+    for start in range(0, len(points), chunk):
+        values[start:start + chunk] = predict_heatmap(
+            access_points, points[start:start + chunk], walls,
+            artifacts, tx_power_dbm, frequency_ghz,
+        ).rssi_dbm
+
+    rssi_grid = np.full(grid_x.shape, np.nan)
+    rssi_grid[inside] = values
+
+    # 4. Soften sharp steps with a Gaussian blur that ignores outside points
+    #    (blur the values and the mask separately, then divide).
+    sigma = smoothing_m / step
+    if sigma > 0:
+        blurred_values = ndimage.gaussian_filter(np.where(inside, rssi_grid, 0.0), sigma)
+        blurred_weights = ndimage.gaussian_filter(inside.astype(float), sigma)
+        rssi_grid = np.where(inside, blurred_values / np.maximum(blurred_weights, 1e-6), np.nan)
+
+    return x_values, y_values, rssi_grid
 
 
 def heatmap_grid(
