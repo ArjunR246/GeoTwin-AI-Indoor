@@ -41,7 +41,7 @@ from .corridors import Corridor, detect_corridors
 from .loader import load_floor_plan
 from .preprocessing import preprocess_floor_plan
 from .rooms import Room, detect_rooms
-from .walls import WallSegment, detect_walls
+from .walls import WallSegment, detect_walls, detect_walls_robust
 
 
 ROI: TypeAlias = tuple[int, int, int, int]
@@ -442,10 +442,10 @@ def process_floor_plan(
     # 4. WALL DETECTION
     # ---------------------------------------------------------
 
-    walls = detect_walls(
-        binary=cleaned,
-        edges=edges,
-    )
+    # detect_walls_robust ignores text, furniture and other small symbols,
+    # and reports each wall once. The older detect_walls(cleaned, edges) is
+    # still available in walls.py for comparison.
+    walls = detect_walls_robust(preprocessing["binary"])
 
     # ---------------------------------------------------------
     # 5. ENCLOSED-REGION / ROOM CANDIDATE DETECTION
