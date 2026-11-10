@@ -23,7 +23,9 @@ for import_path in (BACKEND_ROOT, FRONTEND_SRC):
         sys.path.insert(0, str(import_path))
 
 from utils.calibration import apply_residual_calibration, uncertainty_half_widths
-from utils.rssi_features import build_rssi_features, feature_frame
+from utils.rssi_features import MODEL_FEATURES, build_rssi_features, feature_frame
+from utils.wall_intersections import wall_attenuation_db
+import pandas as pd
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,59 @@ def floorplan_walls_to_backend(
     ]
 
 
+def count_wall_crossings_fast(
+    access_point: tuple[float, float],
+    receiver_positions: Sequence[tuple[float, float]],
+    walls: Sequence[Mapping[str, object]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Count wall crossings from one AP to every receiver at once.
+
+    This gives the same answer as utils.wall_intersections.count_intersections
+    (Shapely ``crosses``), but checks all receivers against all walls in one
+    NumPy calculation instead of one pair at a time.
+
+    Returns:
+        (crossing_counts, attenuation_sums), one value per receiver.
+    """
+    receivers = np.asarray(receiver_positions, dtype=float)  # shape (R, 2)
+    if len(walls) == 0:
+        zeros = np.zeros(len(receivers))
+        return zeros.astype(int), zeros
+
+    # Wall start points, end points and losses, shape (W, 2), (W, 2), (W,)
+    wall_start = np.array([[w["start"]["x"], w["start"]["y"]] for w in walls], dtype=float)
+    wall_end = np.array([[w["end"]["x"], w["end"]["y"]] for w in walls], dtype=float)
+    wall_loss = np.array([wall_attenuation_db(w) for w in walls], dtype=float)
+
+    ap = np.asarray(access_point, dtype=float)  # shape (2,)
+
+    def side(origin, direction_end, point):
+        """Cross product: >0 if point is left of the line, <0 if right, 0 if on it."""
+        return ((direction_end[..., 0] - origin[..., 0]) * (point[..., 1] - origin[..., 1])
+                - (direction_end[..., 1] - origin[..., 1]) * (point[..., 0] - origin[..., 0]))
+
+    # Add axes so every receiver (rows) is compared with every wall (columns).
+    rx = receivers[:, None, :]          # (R, 1, 2)
+    ws = wall_start[None, :, :]         # (1, W, 2)
+    we = wall_end[None, :, :]           # (1, W, 2)
+    ap_b = np.broadcast_to(ap, rx.shape)
+
+    # Do the wall's two ends lie on opposite sides of the signal path?
+    o1 = side(ap_b, rx, ws)
+    o2 = side(ap_b, rx, we)
+    # Do the path's two ends (AP and receiver) lie on opposite sides of the wall?
+    o3 = side(ws, we, np.broadcast_to(ap, ws.shape))
+    o4 = side(ws, we, rx)
+
+    # A tiny tolerance ignores paths that only graze the exact end of a wall.
+    eps = 1e-9
+    crosses = ((o1 * o2) < -eps) & ((o3 * o4) < -eps)   # (R, W) True/False table
+
+    counts = crosses.sum(axis=1)
+    attenuation = crosses.astype(float) @ wall_loss
+    return counts.astype(int), attenuation
+
+
 def predict_heatmap(
     access_points: Sequence[object],
     receiver_positions: Sequence[tuple[float, float]],
@@ -87,20 +142,21 @@ def predict_heatmap(
     if not receiver_positions:
         raise ValueError("At least one receiver position is required.")
 
-    feature_rows = []
+    receivers = np.asarray(receiver_positions, dtype=float)
+    feature_blocks = []
     for access_point in access_points:
-        for receiver in receiver_positions:
-            feature_rows.append(
-                build_rssi_features(
-                    (float(access_point.x), float(access_point.y)),
-                    receiver,
-                    walls,
-                    tx_power_dbm,
-                    frequency_ghz,
-                )
-            )
+        ap_xy = (float(access_point.x), float(access_point.y))
+        counts, losses = count_wall_crossings_fast(ap_xy, receiver_positions, walls)
+        distances = np.hypot(receivers[:, 0] - ap_xy[0], receivers[:, 1] - ap_xy[1])
+        feature_blocks.append(pd.DataFrame({
+            "distance": np.maximum(distances, 0.1),
+            "num_walls_intersected": counts,
+            "wall_attenuation_sum": losses,
+            "tx_power_dbm": float(tx_power_dbm),
+            "frequency_ghz": float(frequency_ghz),
+        }))
 
-    features = feature_frame(feature_rows)
+    features = pd.concat(feature_blocks, ignore_index=True)[MODEL_FEATURES]
     base_predictions = artifacts.model.predict(features)
     predictions = apply_residual_calibration(
         features, base_predictions, artifacts.calibration_model
