@@ -20,6 +20,9 @@ detect_indoor_space() instead finds everything inside the building outline:
        if it lies within the building's overall outline (convex hull).
     7. Remove the wall pixels themselves.
 
+remove_background_pockets() then removes outside areas that arrows or signs
+closed off, using colour (see its docstring).
+
 All sizes are relative to the image, so the same settings work for small and
 large floorplans.
 """
@@ -120,4 +123,86 @@ def detect_indoor_space(
     return np.where((footprint > 0) & (ink == 0), 255, 0).astype(np.uint8)
 
 
-__all__ = ["detect_indoor_space"]
+def remove_background_pockets(
+    image: np.ndarray,
+    binary: np.ndarray,
+    indoor: np.ndarray,
+    min_contrast: float = 25.0,
+    edge_ratio: float = 0.07,
+) -> np.ndarray:
+    """Remove outside "pockets" that were mistaken for indoor space.
+
+    Arrows, callouts and signs drawn on the background can cut the outside
+    into closed pockets next to the building. Those pockets still have the
+    background's colour (e.g. the green behind a photographed plan), while
+    floors inside the building have a different colour.
+
+    A piece of indoor space is removed when:
+      * the outside and the building floor clearly differ in colour (if the
+        plan is, say, white outside and white inside, nothing is removed);
+      * the piece lies near the building edge (within edge_ratio of the
+        image size from the definite outside), so symbols deep inside the
+        building are never touched; and
+      * most of its pixels are closer in colour to the outside than to the
+        building floor.
+    """
+    if image.ndim == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    elif image.shape[2] == 4:
+        image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    height, width = binary.shape
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+    ink = binary < 128
+    outside = (indoor == 0) & ~ink
+
+    # Typical outside colour, sampled along the image border.
+    band = np.zeros((height, width), dtype=bool)
+    b = max(3, int(0.02 * max(height, width)))
+    band[:b] = band[-b:] = True
+    band[:, :b] = band[:, -b:] = True
+    outside_pixels = lab[outside & band]
+    inside_pixels = lab[indoor > 0]
+    if len(outside_pixels) < 100 or len(inside_pixels) < 100:
+        return indoor
+    outside_colour = np.median(outside_pixels, axis=0)
+    inside_colour = np.median(inside_pixels, axis=0)
+    if np.linalg.norm(outside_colour - inside_colour) < min_contrast:
+        return indoor
+
+    closer_to_outside = (
+        np.linalg.norm(lab - outside_colour, axis=2)
+        < np.linalg.norm(lab - inside_colour, axis=2)
+    )
+    distance_to_outside = cv2.distanceTransform(
+        (~outside).astype(np.uint8), cv2.DIST_L2, 3
+    )
+    near_edge = distance_to_outside <= edge_ratio * max(height, width)
+
+    pieces = ((indoor > 0) & ~ink).astype(np.uint8)
+    count, labels = cv2.connectedComponents(pieces, connectivity=4)
+    result = indoor.copy()
+    for index in range(1, count):
+        piece = labels == index
+        if near_edge[piece].any() and closer_to_outside[piece].mean() > 0.5:
+            result[piece] = 0
+
+    return result
+
+
+
+def interior_distance_m(indoor: np.ndarray, metres_per_pixel: float) -> np.ndarray:
+    """Distance (metres) from each pixel to the building's outer edge.
+
+    Wall lines inside the building are first closed up, so the distance is
+    measured to the outside or the image border, not to the nearest wall.
+    """
+    height, width = indoor.shape
+    thickness = max(3, int(0.01 * max(height, width)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (thickness, thickness))
+    building = cv2.morphologyEx(indoor, cv2.MORPH_CLOSE, kernel)
+    building = cv2.copyMakeBorder(building, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+    distance = cv2.distanceTransform((building > 0).astype(np.uint8), cv2.DIST_L2, 5)
+    return distance[1:-1, 1:-1] * metres_per_pixel
+
+
+__all__ = ["detect_indoor_space", "remove_background_pockets", "interior_distance_m"]

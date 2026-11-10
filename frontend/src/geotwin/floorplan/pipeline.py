@@ -38,7 +38,7 @@ from .building_model import (
 )
 from .coordinates import CoordinateTransform
 from .corridors import Corridor, detect_corridors
-from .indoor import detect_indoor_space
+from .indoor import detect_indoor_space, remove_background_pockets
 from .loader import load_floor_plan
 from .preprocessing import preprocess_floor_plan
 from .rooms import Room, detect_rooms
@@ -525,6 +525,11 @@ def process_floor_plan(
         room_polygons=[
             region.polygon for region in detected_regions
         ],
+    )
+    processed_mask = remove_background_pockets(
+        processing_image,
+        preprocessing["binary"],
+        processed_mask,
     )
     indoor_mask = np.zeros((image_height, image_width), dtype=np.uint8)
     indoor_mask[

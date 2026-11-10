@@ -103,6 +103,7 @@ def generate_plan(
             tx_power_dbm=tx_power_dbm,
             frequency_ghz=frequency_ghz,
             threshold_dbm=coverage_threshold_dbm,
+            allowed_ap_positions=valid_ap_positions,
         )
         prediction = predict_heatmap(
             access_points=access_points,

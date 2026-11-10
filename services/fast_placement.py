@@ -335,14 +335,20 @@ def plan_access_points(
     tx_power_dbm: float,
     frequency_ghz: float,
     threshold_dbm: float,
+    allowed_ap_positions: Sequence[tuple[float, float]] | None = None,
 ) -> tuple[PlacementResult, list[PlacedAccessPoint]]:
-    """Build the signal table, optimise placement and return AP records."""
+    """Build the signal table, optimise placement and return AP records.
+
+    allowed_ap_positions: where APs may go (default: every receiver point).
+    Coverage is always measured at all receiver_positions.
+    """
     if not receiver_positions:
         raise ValueError("At least one receiver position is required.")
-    spot_indexes = choose_ap_spots(receiver_positions)
+    candidates = list(allowed_ap_positions or receiver_positions)
+    spot_indexes = choose_ap_spots(candidates)
     if ap_count > len(spot_indexes):
         raise ValueError("More APs requested than there are allowed AP spots.")
-    ap_positions = [receiver_positions[i] for i in spot_indexes]
+    ap_positions = [candidates[i] for i in spot_indexes]
     table = build_signal_table(
         ap_positions, receiver_positions, walls, artifacts, tx_power_dbm, frequency_ghz
     )

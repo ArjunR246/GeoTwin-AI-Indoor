@@ -75,3 +75,78 @@ def test_simple_fixture_corridor_is_usable():
     mask = detect_indoor_space(preprocess_floor_plan(image)["binary"])
     assert mask[400, 600] > 0      # middle of the corridor
     assert mask[20, 20] == 0       # white margin outside the building
+
+
+# --- Outside pockets and AP edge margin ---------------------------------------
+
+from geotwin.floorplan.indoor import interior_distance_m, remove_background_pockets
+from geotwin.floorplan.pipeline import process_floor_plan as _process
+from geotwin.floorplan.rf_adapter import floor_plan_to_rf_geometry
+
+
+def photo_like_plan():
+    """Beige building on a green background. A dark callout line and a sign
+    box close off a pocket of green outside the right wall."""
+    image = np.full((700, 1000, 3), (60, 120, 60), np.uint8)        # green (BGR)
+    cv2.rectangle(image, (100, 100), (800, 600), (170, 210, 225), -1)  # beige floor
+    black = (30, 30, 30)
+    cv2.rectangle(image, (100, 100), (800, 600), black, 8)
+    cv2.line(image, (450, 100), (450, 600), black, 8)
+    # pocket outside the right wall, closed by a line and a sign box
+    cv2.line(image, (800, 250), (990, 250), black, 6)
+    cv2.line(image, (800, 450), (990, 450), black, 6)
+    cv2.line(image, (990, 250), (990, 450), black, 6)
+    return image
+
+
+def test_background_coloured_pocket_is_removed():
+    image = photo_like_plan()
+    mask = _process(image).indoor_mask
+    assert mask[350, 300] > 0          # inside the building
+    assert mask[350, 650] > 0          # other room
+    assert mask[350, 900] == 0         # green pocket outside the right wall
+
+
+def test_white_plans_are_not_changed_by_colour_rule():
+    image, _ = draw_building()
+    binary = preprocess_floor_plan(image)["binary"]
+    indoor = detect_indoor_space(binary)
+    assert np.array_equal(remove_background_pockets(image, binary, indoor), indoor)
+
+
+def test_aps_are_kept_away_from_the_outer_edge():
+    image = photo_like_plan()
+    result = _process(image, physical_width_m=50.0, physical_height_m=35.0)
+    receivers, ap_spots, _, _ = floor_plan_to_rf_geometry(
+        result.building, result.coordinates, 1.0, indoor_mask=result.indoor_mask
+    )
+    assert 0 < len(ap_spots) < len(receivers)
+    # Building runs from x = 5 m to 40 m; AP spots keep a 1 m margin.
+    assert min(x for x, _ in ap_spots) >= 6.0
+    assert max(x for x, _ in ap_spots) <= 39.0
+    # Coverage is still measured right up to the walls.
+    assert min(x for x, _ in receivers) < 6.0
+
+
+def test_interior_distance_grows_towards_the_middle():
+    indoor = np.zeros((100, 100), np.uint8)
+    indoor[10:90, 10:90] = 255
+    distance = interior_distance_m(indoor, metres_per_pixel=0.1)
+    assert distance[50, 50] > distance[12, 50] > 0
+    assert distance[5, 5] == 0
+
+
+def test_cells_whose_centre_lands_on_a_line_still_count():
+    """Lines running exactly through cell centres (desk rows, text, wall
+    lines) must not remove those cells from the usable area."""
+    image = np.full((600, 1000, 3), 255, np.uint8)
+    cv2.rectangle(image, (50, 50), (950, 550), (0, 0, 0), 8)
+    # 1 m cells are 20 px here (50 m x 30 m image); centres sit at y = 10, 30, 50, ...
+    for y in range(110, 550, 40):
+        cv2.line(image, (50, y), (950, y), (0, 0, 0), 2)     # thin lines through centres
+    result = process_floor_plan(image, physical_width_m=50.0, physical_height_m=30.0)
+    receivers, _, _, _ = floor_plan_to_rf_geometry(
+        result.building, result.coordinates, 1.0, indoor_mask=result.indoor_mask
+    )
+    cells_inside_building = 44 * 24          # roughly the 45 m x 25 m interior
+    assert len(receivers) > 0.85 * cells_inside_building
