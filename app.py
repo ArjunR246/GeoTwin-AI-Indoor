@@ -136,8 +136,8 @@ def render_heatmap(result: dict[str, object], width_m: float, height_m: float):
     fig, axis = plt.subplots(figsize=(13, 8), dpi=150)
     axis.imshow(
         result["image_rgb"],
-        extent=[0, width_m, 0, height_m],
-        origin="lower",
+        extent=[0, width_m,height_m,0],
+        origin="upper",
         aspect="auto",
         zorder=0,
     )
@@ -174,8 +174,8 @@ def render_heatmap(result: dict[str, object], width_m: float, height_m: float):
     colorbar.set_label("Predicted RSSI (dBm)")
     axis.set(
         title="Optimized AP Placement and AI-Predicted RSSI",
-        xlabel="X position (m)", ylabel="Y position (m)",
-        xlim=(0, width_m), ylim=(0, height_m),
+        xlabel="X position (m)", ylabel="Y position (m, from top edge)",
+        xlim=(0, width_m), ylim=(height_m,0),
     )
     axis.set_aspect("equal", adjustable="box")
     fig.tight_layout()
