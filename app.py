@@ -599,6 +599,66 @@ BAND_COLOURS = {"Excellent": "#0ca30c", "Good": "#fab219", "Fair": "#ec835a",
                 "Poor": "#d03b3b", "Dead zone": "#3d3d3a"}
 
 
+TODAY_COLOUR = "#2a78d6"
+GEOTWIN_COLOUR = "#1baf7a"
+
+
+def _style_column_axis(axis):
+    axis.set_ylim(0, 100)
+    axis.set_ylabel("Share of walked area (%)")
+    axis.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+    axis.set_axisbelow(True)
+    for side in ("top", "right", "left"):
+        axis.spines[side].set_visible(False)
+    axis.tick_params(axis="y", length=0, colors="#52514e")
+
+
+def _label_columns(axis, bars):
+    for bar in bars:
+        height = bar.get_height()
+        axis.text(bar.get_x() + bar.get_width() / 2, height + 1.5, f"{height:.0f}%",
+                  ha="center", va="bottom", fontsize=10, fontweight="bold", color="#0b0b0b")
+
+
+def headline_columns_figure(today, geotwin, threshold, geotwin_label):
+    """Two side-by-side panels: meets threshold and dead zone, today vs GeoTwin."""
+    figure, axes = plt.subplots(1, 2, figsize=(9, 4.2), dpi=120, sharey=True)
+    panels = (
+        (f"Meets {threshold:.0f} dBm (higher is better)", "meets_threshold"),
+        ("Dead zone (lower is better)", "Dead zone"),
+    )
+    for axis, (title, key) in zip(axes, panels):
+        bars = axis.bar([0, 1], [today[key], geotwin[key]], width=0.55,
+                        color=[TODAY_COLOUR, GEOTWIN_COLOUR], edgecolor="white", linewidth=2)
+        _label_columns(axis, bars)
+        axis.set_xticks([0, 1], ["Today\n(measured)", geotwin_label])
+        axis.set_title(title, fontsize=11, loc="left", color="#0b0b0b")
+        _style_column_axis(axis)
+    axes[1].set_ylabel("")
+    figure.tight_layout()
+    return figure
+
+
+def band_columns_figure(today, geotwin, geotwin_label):
+    """Grouped vertical columns per signal band, today vs GeoTwin."""
+    bands = list(BAND_COLOURS)
+    x = np.arange(len(bands))
+    width = 0.36
+    figure, axis = plt.subplots(figsize=(10, 4.4), dpi=120)
+    for offset, shares, colour, label in (
+        (-width / 2, today, TODAY_COLOUR, "Today (measured)"),
+        (width / 2, geotwin, GEOTWIN_COLOUR, geotwin_label.replace("\n", " ")),
+    ):
+        bars = axis.bar(x + offset, [shares[b] for b in bands], width=width, color=colour,
+                        edgecolor="white", linewidth=2, label=label)
+        _label_columns(axis, bars)
+    axis.set_xticks(x, bands)
+    _style_column_axis(axis)
+    axis.legend(frameon=False, loc="upper left", ncol=2)
+    figure.tight_layout()
+    return figure
+
+
 def comparison_figure(rows):
     """Stacked 100% bars, one per scenario."""
     figure, axis = plt.subplots(figsize=(11, 1.0 + 1.1 * len(rows)), dpi=120)
@@ -762,12 +822,33 @@ def render_calibration_section(combined, aligned_scans, result) -> None:
         (f"Estimated current {len(current_layout)} APs\n(calibrated prediction)", band_shares(walk_current, threshold)),
         (f"GeoTwin, {plan_count} APs\n(calibrated prediction)", band_shares(walk_geotwin, threshold)),
     ]
-    st.markdown("**Walked area: today vs GeoTwin (same calibrated model)**")
-    figure = comparison_figure(rows)
+    today_shares, geotwin_shares = rows[0][1], rows[2][1]
+    geotwin_label = f"GeoTwin\n({plan_count} APs, predicted)"
+    st.markdown("**Before vs after: walked area**")
+    tiles = st.columns(2)
+    tiles[0].metric(f"Meets {threshold:.0f} dBm",
+                    f"{today_shares['meets_threshold']:.0f}% → {geotwin_shares['meets_threshold']:.0f}%")
+    tiles[1].metric("Dead zone",
+                    f"{today_shares['Dead zone']:.0f}% → {geotwin_shares['Dead zone']:.0f}%")
+    figure = headline_columns_figure(today_shares, geotwin_shares, threshold, geotwin_label)
     st.pyplot(figure, width="stretch")
     st.download_button("Download chart PNG", data=figure_bytes(figure),
-                       file_name="geotwin_before_after.png", mime="image/png", key="dl_compare")
+                       file_name="geotwin_headline_bars.png", mime="image/png", key="dl_headline")
     plt.close(figure)
+
+    st.markdown("**Signal bands: today vs GeoTwin**")
+    figure = band_columns_figure(today_shares, geotwin_shares, geotwin_label)
+    st.pyplot(figure, width="stretch")
+    st.download_button("Download chart PNG", data=figure_bytes(figure),
+                       file_name="geotwin_band_bars.png", mime="image/png", key="dl_bands")
+    plt.close(figure)
+
+    with st.expander("Details: full breakdown including the estimated current APs"):
+        figure = comparison_figure(rows)
+        st.pyplot(figure, width="stretch")
+        st.download_button("Download chart PNG", data=figure_bytes(figure),
+                           file_name="geotwin_before_after.png", mime="image/png", key="dl_compare")
+        plt.close(figure)
 
     low, high = model.outcome_range(cell_dist, cell_walls, geotwin_layout, threshold)
     floor_low, floor_high = model.outcome_range(floor_dist, floor_walls, geotwin_layout, threshold)
