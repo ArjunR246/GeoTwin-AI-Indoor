@@ -9,5 +9,6 @@ scikit-learn
 scipy
 shapely
 streamlit
+streamlit-image-coordinates
 uvicorn
 xgboost

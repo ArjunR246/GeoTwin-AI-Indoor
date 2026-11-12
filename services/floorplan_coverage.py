@@ -30,6 +30,24 @@ from scipy import ndimage
 from scipy.spatial import cKDTree
 
 
+# The trained model only ever saw these settings (see backend/data), so it
+# ignores the TX power and frequency inputs. Their effect is added with the
+# standard physics instead: received power rises 1:1 with transmit power, and
+# free-space path loss changes by 20*log10(f / f_trained).
+MODEL_TRAINED_TX_POWER_DBM = 20.0
+MODEL_TRAINED_FREQUENCY_GHZ = 5.0
+
+
+def radio_settings_adjustment_db(tx_power_dbm: float, frequency_ghz: float) -> float:
+    """dB to add to model predictions for settings that differ from training."""
+    if frequency_ghz <= 0:
+        raise ValueError("frequency_ghz must be positive.")
+    return float(
+        (tx_power_dbm - MODEL_TRAINED_TX_POWER_DBM)
+        - 20.0 * np.log10(frequency_ghz / MODEL_TRAINED_FREQUENCY_GHZ)
+    )
+
+
 @dataclass(frozen=True)
 class PredictionArtifacts:
     """Loaded predictor, uncertainty profile, and optional field calibration."""
@@ -162,7 +180,7 @@ def predict_heatmap(
     base_predictions = artifacts.model.predict(features)
     predictions = apply_residual_calibration(
         features, base_predictions, artifacts.calibration_model
-    )
+    ) + radio_settings_adjustment_db(tx_power_dbm, frequency_ghz)
     uncertainty = uncertainty_half_widths(features, artifacts.uncertainty_profile)
 
     receiver_count = len(receiver_positions)
