@@ -27,7 +27,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from services.floorplan_coverage import PredictionArtifacts
+from services.floorplan_coverage import PredictionArtifacts, radio_settings_adjustment_db
 from utils.calibration import apply_residual_calibration
 from utils.rssi_features import MODEL_FEATURES
 from utils.wall_intersections import wall_attenuation_db
@@ -113,6 +113,7 @@ def build_signal_table(
     receivers = np.asarray(receiver_positions, dtype=float)
     symmetric = aps.shape == receivers.shape and np.array_equal(aps, receivers)
     walls_split = _split_walls(walls)
+    adjustment = radio_settings_adjustment_db(tx_power_dbm, frequency_ghz)
     table = np.zeros((len(aps), len(receivers)), dtype=np.float32)
     batch_rows, batch_cells = [], []
 
@@ -120,9 +121,9 @@ def build_signal_table(
         if not batch_rows:
             return
         frame = pd.concat(batch_rows, ignore_index=True)[MODEL_FEATURES]
-        values = apply_residual_calibration(
+        values = (apply_residual_calibration(
             frame, artifacts.model.predict(frame), artifacts.calibration_model
-        ).astype(np.float32)
+        ) + adjustment).astype(np.float32)
         start = 0
         for i, js in batch_cells:
             chunk = values[start:start + len(js)]

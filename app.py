@@ -498,6 +498,12 @@ with st.sidebar:
     with st.expander("Advanced RF settings"):
         tx_power_dbm = st.number_input("TX power (dBm)", value=20.0, step=1.0)
         frequency_ghz = st.selectbox("Frequency (GHz)", options=[2.4, 5.0, 6.0], index=1)
+        st.caption(
+            "The AI model was trained at 20 dBm and 5 GHz. Other TX powers and "
+            "frequencies are applied with standard radio physics (1 dB per dB of "
+            "TX power; free-space loss for frequency). Extra wall loss at higher "
+            "frequencies is not modelled."
+        )
         coverage_threshold_dbm = st.number_input("Coverage threshold (dBm)", value=-67.0, step=1.0)
         wall_loss_db = st.number_input("Detected-wall loss (dB)", min_value=0.0, value=6.0, step=0.5)
     st.divider()
