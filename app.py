@@ -79,8 +79,12 @@ def generate_plan(
     frequency_ghz: float,
     coverage_threshold_dbm: float,
     wall_loss_db: float,
+    no_ap_zones_m: tuple = (),
 ):
-    """Process one plan, optimize AP placement, then predict model RSSI."""
+    """Process one plan, optimize AP placement, then predict model RSSI.
+
+    no_ap_zones_m: rectangles (x0, y0, x1, y1) in metres where APs may not go.
+    """
     suffix = Path(uploaded_file.name).suffix or ".png"
     temporary_path: Path | None = None
     try:
@@ -104,6 +108,13 @@ def generate_plan(
             cell_size_m=grid_resolution_m,
             indoor_mask=pipeline_result.indoor_mask,
         )
+        valid_ap_positions = [
+            point for point in valid_ap_positions
+            if not any(x0 <= point[0] <= x1 and y0 <= point[1] <= y1
+                       for x0, y0, x1, y1 in no_ap_zones_m)
+        ]
+        if len(valid_ap_positions) < ap_count:
+            raise ValueError("The no-AP zones leave too few places for the requested APs.")
         walls = floorplan_walls_to_backend(physical_walls, wall_loss_db)
         best_solution, access_points = plan_access_points(
             receiver_positions=receiver_positions,
@@ -145,6 +156,11 @@ def generate_plan(
             "prediction": prediction,
             "metrics": coverage_metrics(prediction.rssi_dbm, coverage_threshold_dbm),
             "coverage_threshold_dbm": coverage_threshold_dbm,
+            "valid_ap_positions": valid_ap_positions,
+            "walls": walls,
+            "width_m": building_width_m,
+            "height_m": building_height_m,
+            "no_ap_zones_m": no_ap_zones_m,
         }
     finally:
         if temporary_path is not None:
@@ -274,23 +290,48 @@ def apply_saved_alignments(data, scan_files, store):
     applied = 0
     for entry in entries:
         target = names.get(entry.get("scan_file"))
-        if target is None and entry.get("scan_size"):
-            # Names can change when files are shared; the image size does not.
-            same_size = [
+        saved_size = entry.get("scan_size")
+        if target is None and saved_size:
+            # Names change when files are shared, and sharing apps may resize
+            # images, but the shape (width / height) stays the same.
+            same_shape = [
                 scan_file for scan_file in scan_files
-                if list(image_size(scan_file)) == list(entry["scan_size"])
+                if same_aspect(image_size(scan_file), saved_size)
             ]
-            if len(same_size) == 1:
-                target = same_size[0]
+            if len(same_shape) == 1:
+                target = same_shape[0]
         if target is None and len(entries) == 1 and len(scan_files) == 1:
             target = scan_files[0]
         if target is None:
             continue
+        if entry.get("scan_size") and list(image_size(target)) != list(entry["scan_size"]):
+            # Points only fit the exact image they were made on.
+            width, height = image_size(target)
+            st.warning(
+                f"This alignment was made for a {entry['scan_size'][0]}×{entry['scan_size'][1]} image, "
+                f"but {target.name} is {width}×{height}. Upload the original (unresized) scan image."
+            )
+            continue
+        scale_x = scale_y = 1.0
+        if saved_size:
+            width, height = image_size(target)
+            if not same_aspect((width, height), saved_size):
+                st.warning(
+                    f"{target.name} has a different shape from the scan this alignment "
+                    "was made for. Use the original WiFiman image or align it again."
+                )
+                continue
+            scale_x, scale_y = width / saved_size[0], height / saved_size[1]
         points = store.setdefault(scan_key(target), {"scan": [], "plan": []})
-        points["scan"] = [tuple(map(float, p)) for p in entry["scan_points"]]
+        points["scan"] = [(float(x) * scale_x, float(y) * scale_y) for x, y in entry["scan_points"]]
         points["plan"] = [tuple(map(float, p)) for p in entry["plan_points"]]
         applied += 1
     return applied
+
+
+def same_aspect(size_a, size_b, tolerance: float = 0.02) -> bool:
+    """True if two (width, height) sizes have the same shape (within 2%)."""
+    return abs(size_a[0] / size_a[1] - size_b[0] / size_b[1]) <= tolerance * size_b[0] / size_b[1]
 
 
 def image_size(scan_file) -> tuple[int, int]:
@@ -381,7 +422,7 @@ def render_scan_section(floorplan_file) -> None:
         from streamlit_image_coordinates import streamlit_image_coordinates
     except ImportError:
         st.warning("Install `streamlit-image-coordinates` to align scans: `pip install streamlit-image-coordinates`.")
-        return
+        return None
 
     scan_files = st.file_uploader(
         "Upload WiFiman scan images (use WiFiman's share button for the full scan)",
@@ -389,7 +430,7 @@ def render_scan_section(floorplan_file) -> None:
     )
     if not scan_files:
         st.caption("Measured scans are optional. They let you compare real measurements with GeoTwin's predictions.")
-        return
+        return None
 
     store = st.session_state.setdefault("scan_points", {})
     saved_files = st.file_uploader(
@@ -422,7 +463,7 @@ def render_scan_section(floorplan_file) -> None:
             aligned_scans.append((scan_file.name, image_size(scan_file), *result))
 
     if not aligned_scans:
-        return
+        return None
 
     st.download_button(
         "Save all alignments (.json)",
@@ -459,6 +500,320 @@ def render_scan_section(floorplan_file) -> None:
         for name, _, scan, _, _ in aligned_scans
     ], hide_index=True, width="stretch")
     st.caption("Signal values are read from WiFiman's colours, so they are accurate to about one legend step (a few dB).")
+    return combined, aligned_scans
+
+# ---------------------------------------------------------------------------
+# No-AP zones
+# ---------------------------------------------------------------------------
+
+def zones_in_metres(zones_px, image_shape, width_m, height_m):
+    """Convert rectangles from floorplan pixels to metres."""
+    height_px, width_px = image_shape[:2]
+    return tuple(
+        (min(x0, x1) * width_m / width_px, min(y0, y1) * height_m / height_px,
+         max(x0, x1) * width_m / width_px, max(y0, y1) * height_m / height_px)
+        for x0, y0, x1, y1 in zones_px
+    )
+
+
+def draw_zones(image_bgr, zones_px, pending=None):
+    out = image_bgr.copy()
+    thickness = max(3, int(0.004 * max(out.shape[:2])))
+    for x0, y0, x1, y1 in zones_px:
+        p0, p1 = (int(x0), int(y0)), (int(x1), int(y1))
+        shade = out.copy()
+        cv2.rectangle(shade, p0, p1, (60, 60, 210), -1)
+        out = cv2.addWeighted(shade, 0.25, out, 0.75, 0)
+        cv2.rectangle(out, p0, p1, (40, 40, 200), thickness)
+        cv2.line(out, p0, p1, (40, 40, 200), thickness)
+        cv2.line(out, (p0[0], p1[1]), (p1[0], p0[1]), (40, 40, 200), thickness)
+    if pending is not None:
+        cv2.circle(out, (int(pending[0]), int(pending[1])), 3 * thickness, (40, 40, 200), -1)
+    return out
+
+
+def render_zone_section(floorplan_file) -> list:
+    """Click two opposite corners per rectangle to mark areas where APs can't go."""
+    zones = st.session_state.setdefault("no_ap_zones_px", [])
+    editing = st.session_state.get("zone_editing", False)
+    with st.expander(f"No-AP zones (optional) — {len(zones)} marked", expanded=editing):
+        st.caption(
+            "Mark areas where access points must not be installed (for example labs). "
+            "Click two opposite corners of each rectangle. Coverage is still measured "
+            "inside these areas; only AP placement is blocked."
+        )
+        try:
+            from streamlit_image_coordinates import streamlit_image_coordinates
+        except ImportError:
+            st.warning("Install `streamlit-image-coordinates` to draw zones.")
+            return zones
+        plan_bgr = cv2.cvtColor(decode_image(floorplan_file), cv2.COLOR_RGB2BGR)
+        pending = st.session_state.get("zone_corner")
+        value = streamlit_image_coordinates(
+            cv2.cvtColor(draw_zones(plan_bgr, zones, pending), cv2.COLOR_BGR2RGB),
+            width="stretch", key="zone_click",
+        )
+        point = clicked_point(value, (plan_bgr.shape[1], plan_bgr.shape[0]), "zone")
+        if point is not None:
+            st.session_state["zone_editing"] = True      # keep this box open
+            if pending is None:
+                st.session_state["zone_corner"] = point
+            else:
+                zones.append((*pending, *point))
+                st.session_state["zone_corner"] = None
+            st.rerun()
+
+        undo, clear, save, load = st.columns(4)
+        if undo.button("Undo last zone", key="zone_undo"):
+            st.session_state["zone_editing"] = True
+            if st.session_state.get("zone_corner") is not None:
+                st.session_state["zone_corner"] = None
+            elif zones:
+                zones.pop()
+            st.rerun()
+        if clear.button("Clear zones", key="zone_clear"):
+            zones.clear()
+            st.session_state["zone_corner"] = None
+            st.rerun()
+        save.download_button(
+            "Save zones (.json)", data=json.dumps({"no_ap_zones_px": zones}),
+            file_name="no_ap_zones.json", mime="application/json", key="zone_save",
+        )
+        uploaded = load.file_uploader("Load zones", type=["json"], key="zone_load",
+                                      label_visibility="collapsed")
+        if uploaded is not None and st.session_state.get("zone_loaded") != uploaded.file_id:
+            try:
+                zones[:] = [tuple(map(float, z)) for z in json.loads(uploaded.getvalue())["no_ap_zones_px"]]
+                st.session_state["zone_loaded"] = uploaded.file_id
+                st.rerun()
+            except (KeyError, TypeError, ValueError):
+                st.error("That file is not a GeoTwin no-AP zone file.")
+    return zones
+
+
+# ---------------------------------------------------------------------------
+# Calibration and comparison
+# ---------------------------------------------------------------------------
+
+BAND_COLOURS = {"Excellent": "#0ca30c", "Good": "#fab219", "Fair": "#ec835a",
+                "Poor": "#d03b3b", "Dead zone": "#3d3d3a"}
+
+
+def comparison_figure(rows):
+    """Stacked 100% bars, one per scenario."""
+    figure, axis = plt.subplots(figsize=(11, 1.0 + 1.1 * len(rows)), dpi=120)
+    for y, (label, shares) in zip(range(len(rows) - 1, -1, -1), rows):
+        left = 0.0
+        for band, colour in BAND_COLOURS.items():
+            width = shares[band]
+            if width <= 0.4:
+                continue
+            axis.barh(y, width, left=left, color=colour, edgecolor="white", linewidth=2, height=0.6)
+            if width >= 7:
+                axis.text(left + width / 2, y, f"{band}\n{width:.0f}%", ha="center", va="center",
+                          fontsize=8.5, fontweight="bold",
+                          color="#0b0b0b" if band == "Good" else "white")
+            left += width
+    axis.set_yticks(range(len(rows) - 1, -1, -1))
+    axis.set_yticklabels([label for label, _ in rows])
+    axis.set_xlim(0, 100)
+    axis.set_xlabel("Share of walked area (%)")
+    for side in ("top", "right", "left"):
+        axis.spines[side].set_visible(False)
+    figure.tight_layout()
+    return figure
+
+
+def ap_curve_figure(counts, walked, walked_range, floor, floor_range, today, threshold):
+    figure, axis = plt.subplots(figsize=(8, 4), dpi=120)
+    axis.fill_between(counts, [r[0] for r in walked_range], [r[1] for r in walked_range],
+                      color="#2a6fdb", alpha=0.15, linewidth=0)
+    axis.fill_between(counts, [r[0] for r in floor_range], [r[1] for r in floor_range],
+                      color="#7a5195", alpha=0.15, linewidth=0)
+    axis.plot(counts, walked, "-o", color="#2a6fdb", lw=2, ms=7, label="Walked (measured) area")
+    axis.plot(counts, floor, "-o", color="#7a5195", lw=2, ms=7, label="Whole floor")
+    axis.axhline(today, color="#d03b3b", ls="--", lw=1.5)
+    axis.text(counts[-1], today + 1.5, "today, measured", color="#d03b3b", ha="right", fontsize=9)
+    axis.set_xticks(counts)
+    axis.set_xlabel("Number of APs (GeoTwin layout)")
+    axis.set_ylabel(f"Area meeting {threshold:.0f} dBm (%)")
+    axis.set_ylim(0, 100)
+    axis.grid(axis="y", color="#e1e0d9")
+    for side in ("top", "right"):
+        axis.spines[side].set_visible(False)
+    axis.legend(frameon=False, loc="upper left")
+    figure.tight_layout()
+    return figure
+
+
+def calibrated_map_figure(result, receivers, rssi, geotwin_aps, current_aps, threshold):
+    x_values, y_values, grid = heatmap_grid([tuple(r) for r in receivers], rssi)
+    figure, axis = plt.subplots(figsize=(10, 10 * result["height_m"] / result["width_m"] * 0.75), dpi=120)
+    axis.imshow(result["image_rgb"], extent=[0, result["width_m"], result["height_m"], 0], aspect="auto")
+    image = axis.imshow(
+        np.ma.masked_invalid(grid), cmap="turbo", vmin=-90, vmax=-30, alpha=0.6,
+        extent=[grid_edges(x_values)[0], grid_edges(x_values)[-1],
+                grid_edges(y_values)[-1], grid_edges(y_values)[0]],
+        interpolation="bilinear", aspect="auto",
+    )
+    axis.contour(x_values, y_values, np.ma.masked_invalid(grid), levels=[threshold],
+                 colors="white", linewidths=1.2)
+    for number, (x, y) in enumerate(geotwin_aps, start=1):
+        axis.scatter(x, y, marker="*", s=260, color="white", edgecolor="#111827", zorder=5)
+        axis.text(x, y - 1.2, f"G{number}", ha="center", fontsize=8, fontweight="bold",
+                  bbox={"boxstyle": "round,pad=0.15", "fc": "white", "alpha": 0.85}, zorder=6)
+    for x, y in current_aps:
+        axis.scatter(x, y, marker="X", s=110, color="#d03b3b", edgecolor="white", zorder=5)
+    axis.set(xlim=(0, result["width_m"]), ylim=(result["height_m"], 0),
+             xlabel="X position (m)", ylabel="Y position (m, from top edge)")
+    figure.colorbar(image, ax=axis, pad=0.015, label="Calibrated RSSI (dBm)")
+    figure.tight_layout()
+    return figure
+
+
+def render_calibration_section(combined, aligned_scans, result) -> None:
+    """Calibrate a radio model on measured scans and compare layouts."""
+    from services.calibration import band_shares, fit_calibration, path_features, sample_walked_cells
+    from services.fast_placement import assign_channels, choose_ap_spots, optimize_placement
+
+    if result is None:
+        st.info("Generate an AP plan above first (with the building's real size). "
+                "Calibration uses the same floor geometry.")
+        return
+    threshold = result["coverage_threshold_dbm"]
+    st.caption(
+        "Fits signal = P0 − 10·n·log₁₀(distance) − wall loss × walls crossed to your measurements, "
+        "and estimates where the current APs are (outside no-AP zones). P0 is fixed at −35 dBm, "
+        "a typical value 1 m from an AP."
+    )
+    current_count = st.number_input("Number of APs in the building today", 1, 30, 6, key="current_aps")
+
+    key = json.dumps([
+        [name, size, sp, pp] for name, size, _, sp, pp in aligned_scans
+    ] + [result["width_m"], result["height_m"], len(result["valid_ap_positions"]),
+         list(result["no_ap_zones_m"]), int(current_count)])
+    state = st.session_state.get("calibration")
+    if state is not None and state["key"] != key:
+        state = None
+    if st.button("Calibrate with measured scans", type="primary"):
+        with st.spinner("Fitting the model to your measurements..."):
+            plan_shape = combined.rssi_dbm.shape
+            cells, values = sample_walked_cells(
+                combined.rssi_dbm, combined.measured, combined.scanned | combined.measured,
+                result["width_m"], result["height_m"],
+            )
+            candidates = [result["valid_ap_positions"][i]
+                          for i in choose_ap_spots(result["valid_ap_positions"], 1500)]
+            try:
+                model = fit_calibration(cells, values, candidates, result["walls"], int(current_count))
+            except ValueError as error:
+                st.error(str(error))
+                return
+            receivers = np.asarray(result["receiver_positions"], dtype=float)
+            floor_dist, floor_walls = path_features(candidates, receivers, result["walls"])
+            cell_dist, cell_walls = path_features(candidates, cells, result["walls"])
+            state = {
+                "key": key, "model": model, "cells": cells, "values": values,
+                "candidates": candidates, "receivers": receivers,
+                "floor": (floor_dist, floor_walls), "walk": (cell_dist, cell_walls),
+            }
+            st.session_state["calibration"] = state
+    if state is None:
+        return
+
+    model = state["model"]
+    columns = st.columns(4)
+    columns[0].metric("Distance exponent n", f"{model.exponent:.1f}")
+    columns[1].metric("Loss per wall", f"{model.wall_loss_db:.1f} dB")
+    columns[2].metric("Error on unseen cells", f"{model.test_error_db:.1f} dB",
+                      delta=f"{model.test_error_db - model.baseline_error_db:+.1f} dB vs guessing",
+                      delta_color="inverse")
+    columns[3].metric("Dead / signal cells right", f"{model.test_dead_accuracy:.0%} / {model.test_signal_accuracy:.0%}")
+    if not model.is_useful:
+        st.warning(
+            "The calibrated model is not clearly better than guessing the average on cells it "
+            "didn't see. Treat the comparison below as unreliable; more scans would help."
+        )
+    for note in model.notes:
+        st.caption(note)
+    st.caption(
+        f"Based on {model.measured_cells} walked cells with signal and {model.dead_cells} dead-zone "
+        "cells (1 m each). Ranges below cover all fits that match the measurements almost as well."
+    )
+
+    candidates, values = state["candidates"], state["values"]
+    floor_dist, floor_walls = state["floor"]
+    cell_dist, cell_walls = state["walk"]
+    floor_table = model.signal(floor_dist, floor_walls)
+    max_aps = min(len(candidates), max(int(current_count) + 8, 14))
+    plan_count = st.number_input("GeoTwin plan: number of APs", 1, max_aps,
+                                 int(current_count), key="geotwin_count")
+
+    def plan(count):
+        placement = optimize_placement(floor_table, candidates, int(count), threshold)
+        return [candidates.index(p) for p in placement.positions]
+
+    current_layout = [candidates.index(p) for p in model.current_aps]
+    geotwin_layout = plan(plan_count)
+    walk_current = model.signal(cell_dist[current_layout], cell_walls[current_layout]).max(0)
+    walk_geotwin = model.signal(cell_dist[geotwin_layout], cell_walls[geotwin_layout]).max(0)
+    rows = [
+        ("Today (measured)", band_shares(values, threshold)),
+        (f"Estimated current {len(current_layout)} APs\n(calibrated prediction)", band_shares(walk_current, threshold)),
+        (f"GeoTwin, {plan_count} APs\n(calibrated prediction)", band_shares(walk_geotwin, threshold)),
+    ]
+    st.markdown("**Walked area: today vs GeoTwin (same calibrated model)**")
+    figure = comparison_figure(rows)
+    st.pyplot(figure, width="stretch")
+    st.download_button("Download chart PNG", data=figure_bytes(figure),
+                       file_name="geotwin_before_after.png", mime="image/png", key="dl_compare")
+    plt.close(figure)
+
+    low, high = model.outcome_range(cell_dist, cell_walls, geotwin_layout, threshold)
+    floor_low, floor_high = model.outcome_range(floor_dist, floor_walls, geotwin_layout, threshold)
+    st.dataframe([
+        {"Scenario": label.replace("\n", " "), f"Meets {threshold:.0f} dBm": f"{shares['meets_threshold']:.0f}%",
+         "Dead zone": f"{shares['Dead zone']:.0f}%"}
+        for label, shares in rows
+    ], hide_index=True, width="stretch")
+    st.caption(
+        f"GeoTwin {plan_count}-AP plan: {low:.0f}–{high:.0f}% of the walked area and "
+        f"{floor_low:.0f}–{floor_high:.0f}% of the whole floor meet {threshold:.0f} dBm across plausible fits. "
+        "Predictions, not measurements: confirm with a new scan after changes."
+    )
+
+    if st.checkbox("Show how many APs are needed", key="show_curve"):
+        with st.spinner("Planning layouts for different AP counts..."):
+            start = max(1, int(current_count))
+            counts = list(range(start, max_aps + 1, 2))
+            walked, walked_range, floor, floor_range = [], [], [], []
+            for count in counts:
+                layout = plan(count)
+                walked.append(float(100 * (model.signal(cell_dist[layout], cell_walls[layout]).max(0) >= threshold).mean()))
+                walked_range.append(model.outcome_range(cell_dist, cell_walls, layout, threshold))
+                floor.append(float(100 * (floor_table[layout].max(0) >= threshold).mean()))
+                floor_range.append(model.outcome_range(floor_dist, floor_walls, layout, threshold))
+        figure = ap_curve_figure(counts, walked, walked_range, floor, floor_range,
+                                 rows[0][1]["meets_threshold"], threshold)
+        st.pyplot(figure, width="stretch")
+        st.download_button("Download chart PNG", data=figure_bytes(figure),
+                           file_name="geotwin_aps_needed.png", mime="image/png", key="dl_curve")
+        plt.close(figure)
+
+    figure = calibrated_map_figure(
+        result, state["receivers"], floor_table[geotwin_layout].max(0),
+        [candidates[i] for i in geotwin_layout], model.current_aps, threshold,
+    )
+    st.markdown("**Calibrated map of the GeoTwin plan** (★ GeoTwin APs, ✕ estimated current APs, white line = threshold)")
+    st.pyplot(figure, width="stretch")
+    plt.close(figure)
+    channels = assign_channels(floor_table, geotwin_layout)
+    st.dataframe([
+        {"AP": f"G{i}", "X (m)": round(candidates[j][0], 2), "Y (m)": round(candidates[j][1], 2), "Channel": c}
+        for i, (j, c) in enumerate(zip(geotwin_layout, channels), start=1)
+    ], hide_index=True, width="stretch")
+    st.caption("Estimated current AP positions are approximate: they are inferred from the measurements, not confirmed.")
+
 
 def figure_bytes(figure) -> bytes:
     buffer = BytesIO()
@@ -525,15 +880,21 @@ else:
         if st.button("Generate AP plan", type="primary", width="stretch"):
             try:
                 with st.spinner("Extracting geometry, optimizing AP locations, and predicting coverage..."):
+                    zones_m = zones_in_metres(
+                        st.session_state.get("no_ap_zones_px", []),
+                        decode_image(uploaded_file).shape,
+                        building_width_m, building_height_m,
+                    )
                     st.session_state.plan_result = generate_plan(
                         uploaded_file, building_width_m, building_height_m,
                         grid_resolution_m, ap_count, tx_power_dbm, frequency_ghz,
-                        coverage_threshold_dbm, wall_loss_db,
+                        coverage_threshold_dbm, wall_loss_db, zones_m,
                     )
                 st.success("Your AP plan is ready.")
             except Exception as error:
                 st.session_state.plan_result = None
                 st.error(f"Unable to generate the AP plan: {error}")
+    render_zone_section(uploaded_file)
 
 result = st.session_state.plan_result
 if result is not None:
@@ -580,4 +941,8 @@ if result is not None:
 if uploaded_file is not None:
     st.divider()
     st.subheader("Measured scans (WiFiman)")
-    render_scan_section(uploaded_file)
+    scans = render_scan_section(uploaded_file)
+    if scans is not None:
+        st.divider()
+        st.subheader("Calibrate and compare with GeoTwin")
+        render_calibration_section(scans[0], scans[1], st.session_state.get("plan_result"))
